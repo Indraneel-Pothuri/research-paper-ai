@@ -74,36 +74,90 @@ print("=" * 72)
 print("LOADING RESEARCH PAPER AI")
 print("=" * 72)
 
-print("\nLoading embedding model...")
 
-embedding_model = SentenceTransformer(
-    EMBEDDING_MODEL
+# ------------------------------------------------------------
+# LAZY EMBEDDING MODEL
+# ------------------------------------------------------------
+#
+# IMPORTANT FOR DEPLOYMENT:
+#
+# Do NOT load SentenceTransformer during module import.
+#
+# Render/Uvicorn needs the application to start and bind to
+# $PORT quickly. Loading the Hugging Face model during import
+# can delay startup and cause Render's port scanner to timeout.
+#
+# The model will be loaded only when retrieve_chunks() is called.
+# ------------------------------------------------------------
+
+embedding_model = None
+
+
+def get_embedding_model():
+    """
+    Load the embedding model only when it is first required.
+
+    This keeps FastAPI/Uvicorn startup lightweight and avoids
+    blocking Render's port detection during deployment.
+    """
+
+    global embedding_model
+
+    if embedding_model is None:
+
+        print(
+            "\nLoading embedding model..."
+        )
+
+        embedding_model = SentenceTransformer(
+            EMBEDDING_MODEL
+        )
+
+        print(
+            "Embedding model loaded successfully."
+        )
+
+    return embedding_model
+
+
+# ============================================================
+# LOAD RESEARCH-PAPER EMBEDDINGS
+# ============================================================
+
+print(
+    "\nLoading research-paper embeddings..."
 )
-
-print("Embedding model loaded successfully.")
-
-print("\nLoading research-paper embeddings...")
 
 embeddings_path = Path(
     EMBEDDINGS_FILE
 )
 
 if not embeddings_path.exists():
+
     raise FileNotFoundError(
-        f"Embeddings file not found: {embeddings_path}"
+        f"Embeddings file not found: "
+        f"{embeddings_path}"
     )
+
 
 with embeddings_path.open(
     "r",
     encoding="utf-8",
 ) as file:
-    documents = json.load(file)
+
+    documents = json.load(
+        file
+    )
+
 
 print(
-    f"Total chunks loaded: {len(documents)}"
+    f"Total chunks loaded: "
+    f"{len(documents)}"
 )
 
+
 if not documents:
+
     raise ValueError(
         "The embeddings file is empty."
     )
@@ -113,7 +167,9 @@ if not documents:
 # TEXT NORMALIZATION
 # ============================================================
 
-def normalize_text(text: str) -> str:
+def normalize_text(
+    text: str,
+) -> str:
     """
     Normalize text for lightweight keyword matching.
     """
@@ -139,7 +195,9 @@ def normalize_text(text: str) -> str:
 # QUERY KEYWORDS
 # ============================================================
 
-def extract_keywords(question: str):
+def extract_keywords(
+    question: str,
+):
     """
     Extract useful keywords.
 
@@ -209,6 +267,7 @@ def keyword_overlap(
     """
 
     if not question_keywords:
+
         return 0.0
 
     normalized = normalize_text(
@@ -218,7 +277,9 @@ def keyword_overlap(
     matched = 0
 
     for keyword in question_keywords:
+
         if keyword in normalized:
+
             matched += 1
 
     return matched / len(
@@ -238,8 +299,6 @@ def build_retrieval_query(
     Convert a conversational follow-up question into a
     self-contained retrieval query.
 
-    IMPORTANT:
-
     We do NOT concatenate the entire conversation.
 
     Example:
@@ -256,17 +315,21 @@ def build_retrieval_query(
     """
 
     if not history:
+
         return question.strip()
+
 
     recent_history = history[
         -MAX_HISTORY_TURNS:
     ]
+
 
     history_text = "\n".join(
         f"{item['role'].upper()}: "
         f"{item['content']}"
         for item in recent_history
     )
+
 
     rewrite_system_prompt = """
 You are a retrieval-query rewriting assistant for a
@@ -337,10 +400,13 @@ Output:
 Why is experience replay important in DQN?
 """
 
+
     messages = [
         {
             "role": "system",
-            "content": rewrite_system_prompt.strip(),
+            "content": (
+                rewrite_system_prompt.strip()
+            ),
         },
         {
             "role": "user",
@@ -356,6 +422,7 @@ Why is experience replay important in DQN?
         },
     ]
 
+
     try:
 
         result = generate_with_fallback(
@@ -370,11 +437,17 @@ Why is experience replay important in DQN?
         )
 
         # Prevent excessively long retrieval queries.
-        if rewritten and len(rewritten) <= 500:
+        if (
+            rewritten
+            and len(rewritten) <= 500
+        ):
+
             return rewritten
 
     except Exception:
+
         pass
+
 
     # Safe fallback:
     # If rewriting fails, use the original question.
@@ -398,20 +471,34 @@ def retrieve_chunks(
     reranking signal.
     """
 
-    query_embedding = embedding_model.encode(
+    # --------------------------------------------------------
+    # LOAD EMBEDDING MODEL ONLY WHEN NEEDED
+    # --------------------------------------------------------
+
+    model = get_embedding_model()
+
+
+    # --------------------------------------------------------
+    # CREATE QUERY EMBEDDING
+    # --------------------------------------------------------
+
+    query_embedding = model.encode(
         question,
         normalize_embeddings=True,
     )
+
 
     question_keywords = extract_keywords(
         question
     )
 
+
     candidates = []
 
-    # --------------------------------------------------------
-    # Semantic retrieval
-    # --------------------------------------------------------
+
+    # ========================================================
+    # SEMANTIC RETRIEVAL
+    # ========================================================
 
     for doc in documents:
 
@@ -420,16 +507,21 @@ def retrieve_chunks(
             dtype=np.float32,
         )
 
+
         norm = np.linalg.norm(
             doc_embedding
         )
 
+
         if norm == 0:
+
             continue
+
 
         doc_embedding = (
             doc_embedding / norm
         )
+
 
         similarity = float(
             np.dot(
@@ -438,16 +530,19 @@ def retrieve_chunks(
             )
         )
 
+
         candidates.append(
             {
                 "chunk_id": doc.get(
                     "chunk_id",
                     "unknown",
                 ),
+
                 "paper_id": doc.get(
                     "paper_id",
                     "unknown",
                 ),
+
                 "paper_name": doc.get(
                     "paper_name",
                     doc.get(
@@ -455,38 +550,45 @@ def retrieve_chunks(
                         "unknown",
                     ),
                 ),
+
                 "page": doc.get(
                     "page",
                     "?",
                 ),
+
                 "section": doc.get(
                     "section",
                     "",
                 ),
+
                 "text": doc.get(
                     "text",
                     "",
                 ),
+
                 "similarity": similarity,
             }
         )
 
-    # --------------------------------------------------------
-    # Initial candidate selection
-    # --------------------------------------------------------
+
+    # ========================================================
+    # INITIAL CANDIDATE SELECTION
+    # ========================================================
 
     candidates.sort(
         key=lambda item: item["similarity"],
         reverse=True,
     )
 
+
     candidates = candidates[
         :RETRIEVAL_K
     ]
 
-    # --------------------------------------------------------
-    # Reranking
-    # --------------------------------------------------------
+
+    # ========================================================
+    # RERANKING
+    # ========================================================
 
     for item in candidates:
 
@@ -495,7 +597,11 @@ def retrieve_chunks(
             item["text"],
         )
 
-        item["keyword_overlap"] = overlap
+
+        item["keyword_overlap"] = (
+            overlap
+        )
+
 
         # Semantic similarity remains dominant.
         item["score"] = (
@@ -503,48 +609,61 @@ def retrieve_chunks(
             + 0.20 * overlap
         )
 
+
     candidates.sort(
         key=lambda item: item["score"],
         reverse=True,
     )
 
-    # --------------------------------------------------------
-    # Diversity filtering
-    # --------------------------------------------------------
+
+    # ========================================================
+    # DIVERSITY FILTERING
+    # ========================================================
 
     selected = []
 
     seen_pages = {}
 
+
     for item in candidates:
 
         paper = item["paper_name"]
+
         page = item["page"]
+
 
         page_key = (
             paper,
             page,
         )
 
+
         page_count = seen_pages.get(
             page_key,
             0,
         )
 
+
         # Maximum two chunks from one page.
         if page_count >= 2:
+
             continue
+
 
         selected.append(
             item
         )
 
+
         seen_pages[page_key] = (
             page_count + 1
         )
 
+
         if len(selected) >= top_k:
+
             break
+
 
     return selected
 
@@ -553,12 +672,15 @@ def retrieve_chunks(
 # CONTEXT
 # ============================================================
 
-def build_context(results):
+def build_context(
+    results,
+):
     """
     Convert retrieved chunks into LLM context.
     """
 
     parts = []
+
 
     for index, result in enumerate(
         results,
@@ -577,6 +699,7 @@ Section: {result['section']}
 {result['text']}
 """
         )
+
 
     return "\n".join(
         parts
@@ -661,6 +784,7 @@ def build_messages(
 
     history_text = ""
 
+
     if history:
 
         history_text = (
@@ -674,6 +798,7 @@ def build_messages(
                 ]
             )
         )
+
 
     user_prompt = f"""
 RETRIEVED RESEARCH-PAPER EVIDENCE
@@ -693,6 +818,7 @@ CURRENT USER QUESTION
 Answer the CURRENT user question using the retrieved
 research-paper evidence.
 """
+
 
     return [
         {
@@ -722,13 +848,16 @@ def display_sources(
         + "-" * 72
     )
 
+
     print(
         "RETRIEVED SOURCES"
     )
 
+
     print(
         "-" * 72
     )
+
 
     for index, result in enumerate(
         results,
@@ -775,37 +904,47 @@ def main():
         + "=" * 72
     )
 
+
     print(
         "RESEARCH PAPER AI"
     )
+
 
     print(
         "=" * 72
     )
 
+
     print(
         "\nAsk questions about your research papers."
     )
+
 
     print(
         "Commands:"
     )
 
+
     print(
         "  clear   - clear conversation history"
     )
+
 
     print(
         "  history - show conversation history"
     )
 
+
     print(
         "  exit    - stop"
     )
 
+
     print()
 
+
     history = []
+
 
     while True:
 
@@ -826,8 +965,11 @@ def main():
 
             break
 
+
         if not question:
+
             continue
+
 
         # ====================================================
         # COMMANDS
@@ -841,6 +983,7 @@ def main():
 
             break
 
+
         if question.lower() == "clear":
 
             history.clear()
@@ -850,6 +993,7 @@ def main():
             )
 
             continue
+
 
         if question.lower() == "history":
 
@@ -866,13 +1010,16 @@ def main():
                     + "-" * 72
                 )
 
+
                 print(
                     "CONVERSATION HISTORY"
                 )
 
+
                 print(
                     "-" * 72
                 )
+
 
                 for item in history:
 
@@ -882,6 +1029,7 @@ def main():
                     )
 
             continue
+
 
         # ====================================================
         # CASUAL CONVERSATION
@@ -898,11 +1046,13 @@ def main():
             "good night",
         }
 
+
         if question.lower() in casual_words:
 
             print(
                 "\nCasual conversation..."
             )
+
 
             messages = [
                 {
@@ -919,23 +1069,28 @@ def main():
                 },
             ]
 
+
             try:
 
                 result = generate_with_fallback(
                     messages
                 )
 
+
                 display_provider(
                     result
                 )
+
 
                 print(
                     "\nAI:"
                 )
 
+
                 print(
                     result.text
                 )
+
 
             except Exception as exc:
 
@@ -943,16 +1098,20 @@ def main():
                     "\n[LLM] All providers failed."
                 )
 
+
                 print(
                     f"Technical reason: {exc}"
                 )
+
 
             print(
                 "\n"
                 + "=" * 72
             )
 
+
             continue
+
 
         # ====================================================
         # RESEARCH QUESTION
@@ -962,10 +1121,9 @@ def main():
             "\nUnderstanding question..."
         )
 
+
         # ----------------------------------------------------
         # Create focused retrieval query.
-        #
-        # This is the major conversational improvement.
         # ----------------------------------------------------
 
         retrieval_query = build_retrieval_query(
@@ -973,9 +1131,12 @@ def main():
             history=history,
         )
 
+
         print(
-            f"[RETRIEVAL QUERY] {retrieval_query}"
+            f"[RETRIEVAL QUERY] "
+            f"{retrieval_query}"
         )
+
 
         # ----------------------------------------------------
         # Retrieve using ONLY the focused query.
@@ -985,9 +1146,11 @@ def main():
             retrieval_query
         )
 
+
         display_sources(
             results
         )
+
 
         if not results:
 
@@ -997,6 +1160,7 @@ def main():
             )
 
             continue
+
 
         # ====================================================
         # WEAK RETRIEVAL WARNING
@@ -1022,6 +1186,7 @@ def main():
                 results
             )
 
+
         # ====================================================
         # GENERATE ANSWER
         # ====================================================
@@ -1030,11 +1195,13 @@ def main():
             "\nGenerating answer..."
         )
 
+
         messages = build_messages(
             question=question,
             context=context,
             history=history,
         )
+
 
         try:
 
@@ -1042,17 +1209,21 @@ def main():
                 messages
             )
 
+
             display_provider(
                 result
             )
+
 
             print(
                 "\nAI:"
             )
 
+
             print(
                 result.text
             )
+
 
             # ------------------------------------------------
             # Store the actual conversation.
@@ -1068,6 +1239,7 @@ def main():
                 }
             )
 
+
             history.append(
                 {
                     "role": "assistant",
@@ -1075,15 +1247,18 @@ def main():
                 }
             )
 
+
         except Exception as exc:
 
             print(
                 "\n[LLM] All providers failed."
             )
 
+
             print(
                 f"Technical reason: {exc}"
             )
+
 
         print(
             "\n"
@@ -1096,4 +1271,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
