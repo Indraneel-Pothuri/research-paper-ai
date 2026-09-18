@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-from llm_provider import generate_with_fallback
+from retrieval.llm_provider import generate_with_fallback
 
 
 # ============================================================
